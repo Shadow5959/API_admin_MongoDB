@@ -64,7 +64,7 @@ const login = async (req, res, next) => {
   if ((!email && !number) || !password) {
     return next(new AppError("Either email or number, and password are required", 400));
   }
-  const result = await User.find({ $or: [{ email: email }, { phoneNumber: number }] });
+  const result = await User.find({ $and: [{ $or: [{ email: email }, { phoneNumber: number }] }, { isDeleted: false }] });
   if (result.length === 0) {
     return next(new AppError("User not found", 404));
   }
@@ -176,7 +176,7 @@ const user = async (req, res, next) => {
   if (!email) {
     return next(new AppError("Email is required", 400));
   }
-  const results = await User.find({ email: email });
+  const results = await User.find( {$and: [{ email: email},{ isDeleted: false }] });
   if (results.length === 0) {
     return next(new AppError("User not found", 404));
   }
@@ -190,23 +190,24 @@ const user = async (req, res, next) => {
 //   return res.status(200).json({ message: "Logged out" });
 // };
 
-// const address = async (req, res, next) => {
-//   const { id } = req.query;
-//   console.log(`received id: ${id}`);
-//   if (!id) {
-//     return next(new AppError("User id is required", 400));
-//   }
-//   const query = 'SELECT * FROM jeweltest.useraddress WHERE user_id = ? and address_active = 1';
-//   db.query(query, [id], (err, results) => {
-//     if (err) {
-//       return next(new AppError("Database error while fetching addresses", 500));
-//     }
-//     if (!results || results.length === 0) {
-//       return next(new AppError("No addresses found for this user", 404));
-//     }
-//     return res.status(200).json(results);
-//   });
-// };
+const address = async (req, res, next) => {
+  const { id } = req.query;
+  console.log(`received id: ${id}`);
+  if (!id) {
+    return next(new AppError("User id is required", 400));
+  }
+  const results = await User.findOne({ _id: id });
+  
+  if (results.length === 0) {
+    return next(new AppError("User not found", 404));
+  }
+  const user = {
+    _id: results._id,
+    address: results.address.filter(addr => !addr.isDeleted)
+  };
+  console.log(user);
+  return res.status(200).json(user);
+}
 
 // const userOrders = async (req, res, next) => {
 //   const { id } = req.query;
@@ -257,76 +258,88 @@ const user = async (req, res, next) => {
 //   });
 // };
 
-// const updateAddress = async (req, res, next) => {
-//   const { address_id, id, address, city, state, country, pincode } = req.body;
-//   console.log(`received data id: ${id}, address: ${address}, city: ${city}, state: ${state}, country: ${country}, pincode: ${pincode}`);
-//   if (!id || !address || !address_id || !city || !state || !country || !pincode) {
-//     return next(new AppError("User id, address, city, state, country, and pincode are required", 400));
-//   }
-//   db.query('UPDATE useraddress SET address = ?, city = ?, state = ?, country = ?, pincode = ? WHERE user_id = ? AND address_id = ? AND address_active = 1', [address, city, state, country, pincode, id, address_id], (err, results) => {
-//     if (err) {
-//       return next(new AppError("Database error while updating address", 500));
-//     }
-//     return res.status(200).json({ id, address });
-//   });
-// };
+const updateAddress = async (req, res, next) => {
+  const { id, address_id } = req.query;
+  const { address, city, state, country, pincode } = req.body;
+  console.log(`received data id: ${id}, address: ${address}, city: ${city}, state: ${state}, country: ${country}, pincode: ${pincode}`);
+  if (!id || !address || !address_id || !city || !state || !country || !pincode) {
+    return next(new AppError("User id, address, city, state, country, and pincode are required", 400));
+  }
+  const addressResults = await User.updateOne(
+    { _id: id, 'address._id': address_id },
+    {
+      $set: {
+        'address.$.address': address,
+        'address.$.city': city,
+        'address.$.state': state,
+        'address.$.country': country,
+        'address.$.pincode': pincode,
+      },
+    }
+  );
+  if (addressResults.modifiedCount === 0) {
+    return next(new AppError("Failed to update address", 500));
+  }
+  return res.status(200).json({ id, address_id, address, city, state, country, pincode, message: "Address updated successfully" });
+};
 
-// const deleteAddress = async (req, res, next) => {
-//   const { id, address_id } = req.query;
-//   console.log(`received id: ${id}, address_id: ${address_id}`);
-//   if (!id || !address_id) {
-//     return next(new AppError("User id and address id are required", 400));
-//   }
-//   db.query('UPDATE useraddress SET address_active = 0 WHERE user_id = ? AND address_id = ?', [id, address_id], (err, results) => {
-//     if (err) {
-//       return next(new AppError("Database error while deleting address", 500));
-//     }
-//     return res.status(200).json({ id, address_id });
-//   });
-// };
+const deleteAddress = async (req, res, next) => {
+  const { id, address_id } = req.query;
+  console.log(`received id: ${id}, address_id: ${address_id}`);
+  if (!id || !address_id) {
+    return next(new AppError("User id and address id are required", 400));
+  }
+  const addressResults = await User.updateOne(
+    { _id: id, 'address._id': address_id },
+    {
+      $set: {
+        'address.$.isDeleted': true,
+      },
+    }
+  );
+  if (addressResults.modifiedCount === 0) {
+    return next(new AppError("Failed to delete address", 500));
+  }
+  return res.status(200).json({ id, address_id, message: "Address deleted successfully" });
+};
+const updateUser = async (req, res, next) => {
+  const { name, gender, email } = req.body;
+  const { id } = req.query;
+  console.log(`received data id: ${id}, name: ${name}, gender: ${gender}`);
+  if (!id) {
+    return next(new AppError("User id is required", 400));
+  }
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return next(new AppError("Invalid email format", 400));
+  }
+  const results = await User.find({ _id: id });
+  if (results.length === 0) {
+    return next(new AppError("User not found", 404));
+  }
+    const user = results[0];
+    const updatedName = name || user.name;
+    const updatedGender = gender || user.gender;
+    const updatedEmail = email || user.email;
 
-// const updateUser = async (req, res, next) => {
-//   const { name, gender, email } = req.body;
-//   const { id } = req.query;
-//   console.log(`received data id: ${id}, name: ${name}, gender: ${gender}`);
-//   if (!id) {
-//     return next(new AppError("User id is required", 400));
-//   }
-//   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-//   if (!emailRegex.test(email)) {
-//     return next(new AppError("Invalid email format", 400));
-//   }
-//   const query = 'SELECT user_name, user_gender, user_email FROM jeweltest.users WHERE user_id = ?';
-//   db.query(query, [id], (err, results) => {
-//     if (err) {
-//       return next(new AppError("Database error while fetching user", 500));
-//     }
-//     if (results.length === 0) {
-//       return next(new AppError("User not found", 404));
-//     }
-//     const user = results[0];
-//     const updatedName = name || user.user_name;
-//     const updatedGender = gender || user.user_gender;
-//     const updatedEmail = email || user.user_email;
-
-//     db.query('SELECT user_email FROM jeweltest.users WHERE user_email = ?', [updatedEmail], (err, emailResults) => {
-//       if (err) {
-//         return next(new AppError("Database error while checking email", 500));
-//       }
-//       if (emailResults.length > 0) {
-//         return next(new AppError("Email already in use", 409));
-//       }
-//     });
-
-//     const updateQuery = 'UPDATE jeweltest.users SET user_name = ?, user_gender = ?, user_email = ? WHERE user_id = ?';
-//     db.query(updateQuery, [updatedName, updatedGender, updatedEmail, id], (err) => {
-//       if (err) {
-//         return next(new AppError("Database error while updating user", 500));
-//       }
-//       return res.status(200).json({ id, name: updatedName, gender: updatedGender });
-//     });
-//   });
-// };
+  const emailCheck = await User.find({ email: updatedEmail });
+  if (emailCheck.length > 0) {
+    return next(new AppError("Email already exists", 400));
+  }
+  const userResults = await User.updateOne(
+    { _id: id },
+    {
+      $set: {
+        name: updatedName,
+        gender: updatedGender,
+        email: updatedEmail,
+  }
+});
+  if (userResults.modifiedCount === 0) {
+    return next(new AppError("Failed to update user", 500));
+  }
+  return res.status(200).json({ id, name: updatedName, gender: updatedGender, email: updatedEmail, message: "User updated" });
+};
 
 // const updateOrder = async (req, res, next) => {
 //   const { id, status, order_id } = req.body;
@@ -376,5 +389,4 @@ const user = async (req, res, next) => {
 //   );
 // };
 
-// module.exports = { register, login, addAddress, userOrder, user, logout, address, userOrders, updateAddress, deleteAddress, updateUser, updateOrder };
-module.exports = { register, user, login, addAddress };
+module.exports = { register, user, login, addAddress, address, updateAddress, deleteAddress, updateUser  };
