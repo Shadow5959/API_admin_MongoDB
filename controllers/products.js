@@ -1,337 +1,232 @@
-const db = require('../database.js');
+const {Product, Variant} = require('../database.js');
+const mongoose = require('mongoose');
 const { AppError } = require('../utils/errorHandler');
 
+
 const products = async (req, res, next) => {
-  const query = `SELECT * from jeweltest.product p
-    LEFT JOIN jeweltest.variant v on p.product_id = v.product_id
-    LEFT JOIN jeweltest.category c on p.cat_id = c.cat_id
-    LEFT JOIN jeweltest.productimages pi on v.variant_id = pi.variant_id
-    where p.product_active = 1 and v.variant_active = 1
-    group by p.product_id, v.variant_id
-  `;
-  db.query(query, (err, results) => {
-    if (err) {
-      return next(new AppError("Database error while fetching products", 500));
-    }
-    if (!results || results.length === 0) {
-      return next(new AppError("No products found", 404));
-    }
-    const sortObjectKeys = (obj) =>
-      Object.keys(obj)
-        .sort()
-        .reduce((sortedObj, key) => {
-          sortedObj[key] = obj[key];
-          return sortedObj;
-        }, {});
-    const sortedResults = results.map(result => sortObjectKeys(result));
-    return res.status(200).json(sortedResults);
-  });
+  try {
+    let products = await Product.find()
+      .populate('categoryId', 'name subcategories')
+      .populate('type', 'name');
+
+    return res.status(200).json({
+      message: "Products retrieved successfully",
+      products
+    });
+  } catch (err) {
+    return next(err);
+  }
 };
 
 const productVariants = async (req, res, next) => {
-  const { id } = req.query;
-  console.log(`received id: ${id}`);
-  if (!id) {
-    return next(new AppError("Product id is required", 400));
+  try {
+    const { id } = req.query;
+    console.log(`received id: ${id}`);
+    if (!id) {
+      return next(new AppError("Product id is required", 400));
+    }
+    const products = await Product.find({ _id: id });
+    return res.status(200).json({ variants: products[0]?.variants || [] });
+  } catch (err) {
+    return next(new AppError("Error retrieving product variants", 500));
   }
-  const query = `SELECT v.*, pi.image_url FROM jeweltest.variant v
-    LEFT JOIN jeweltest.productimages pi on v.variant_id = pi.variant_id
-    WHERE v.product_id = ? And v.variant_active = 1`;
-  db.query(query, [id], (err, results) => {
-    if (err) {
-      return next(new AppError("Database error while fetching product variants", 500));
-    }
-    if (!results || results.length === 0) {
-      return next(new AppError("No variants found for this product", 404));
-    }
-    const sortObjectKeys = (obj) =>
-      Object.keys(obj)
-        .sort()
-        .reduce((sortedObj, key) => {
-          sortedObj[key] = obj[key];
-          return sortedObj;
-        }, {});
-    const sortedResults = results.map(result => sortObjectKeys(result));
-    return res.status(200).json(sortedResults);
-  });
 };
 
 const addProduct = async (req, res, next) => {
-  const { name, description, category, type, subcategory, variants_count } = req.body;
+  try {
+    // Destructure required fields from the request body
+    let { name, description, category, type, subcategory, variants_count } = req.body;
 
-  if (!name || !category || !type || !subcategory || !variants_count) {
-    return next(new AppError("Missing required fields for product", 400));
-  }
-
-  const count = parseInt(variants_count, 10);
-  if (isNaN(count) || count < 1) {
-    return next(new AppError("Invalid variants_count", 400));
-  }
-
-  const variantsArray = [];
-  for (let i = 0; i < count; i++) {
-    const variant = {
-      variant_name: req.body[`variant_${i}_variant_name`],
-      price: req.body[`variant_${i}_price`],
-      stock: req.body[`variant_${i}_stock`],
-      size: req.body[`variant_${i}_size`],
-      material: req.body[`variant_${i}_material`],
-    };
-
-    if (!variant.variant_name || !variant.price || !variant.stock || !variant.size || !variant.material) {
-      return next(new AppError(`Missing required variant fields for variant ${i}`, 400));
-    }
-    variantsArray.push(variant);
-  }
-
-  let productCoverFile = req.files.find(file => file.fieldname === 'product_cover');
-  const variantImagesMap = {};
-  req.files.forEach(file => {
-    if (file.fieldname.startsWith('variant_images_')) {
-      const index = file.fieldname.split('variant_images_')[1];
-      if (!variantImagesMap[index]) {
-        variantImagesMap[index] = [];
-      }
-      variantImagesMap[index].push(file);
-    }
-  });
-
-  db.getConnection((err, connection) => {
-    if (err) {
-      return next(new AppError("Error getting database connection", 500));
+    if (!name || !description || !category || !type || !subcategory || !variants_count) {
+      return next(new AppError("Missing required fields for product", 400));
     }
 
-    connection.beginTransaction(err => {
-      if (err) {
-        connection.release();
-        return next(new AppError("Error starting transaction", 500));
-      }
+    // Trim input values
+    category = category.trim();
+    subcategory = subcategory.trim();
+    type = type.trim();
 
-      const productData = {
-        product_name: name,
-        product_desc: description,
-        cat_id: category,
-        type_id: type,
-        subcategory_id: subcategory,
-        product_cover: productCoverFile ? productCoverFile.filename : null,
-        created_at: new Date()
+    // Validate that category, subcategory, and type are valid ObjectId strings
+    if (!mongoose.Types.ObjectId.isValid(category)) {
+      return next(new AppError("Invalid categoryId format", 400));
+    }
+    if (!mongoose.Types.ObjectId.isValid(subcategory)) {
+      return next(new AppError("Invalid subcategoryId format", 400));
+    }
+    if (!mongoose.Types.ObjectId.isValid(type)) {
+      return next(new AppError("Invalid type format", 400));
+    }
+
+    // Convert variants_count to a number and validate it
+    const count = parseInt(variants_count, 10);
+    if (isNaN(count) || count < 1) {
+      return next(new AppError("Invalid variants_count", 400));
+    }
+
+    // Pre-generate a new product _id to assign to each variant's productId
+    const newProductId = new mongoose.Types.ObjectId();
+
+    // Build an array for variants using the schema's exact field names
+    const variantsArray = [];
+    for (let i = 0; i < count; i++) {
+      const variant = {
+        // Use "varirantName" (as defined in your variant schema)
+        varirantName: req.body[`variant_${i}_variant_name`],
+        price: req.body[`variant_${i}_price`],
+        stock: req.body[`variant_${i}_stock`],
+        size: req.body[`variant_${i}_size`],
+        material: req.body[`variant_${i}_material`],
+        images: [], // Will be populated below if images are provided
+        productId: newProductId // Pre-assign the productId to meet the schema requirement
       };
 
-      connection.query('INSERT INTO product SET ?', productData, (err, productResults) => {
-        if (err) {
-          connection.rollback(() => {
-            connection.release();
-            return next(new AppError("Error inserting product", 500));
-          });
+      if (
+        !variant.varirantName ||
+        !variant.price ||
+        !variant.stock ||
+        !variant.size ||
+        !variant.material
+      ) {
+        return next(new AppError(`Missing required variant fields for variant ${i}`, 400));
+      }
+
+      variantsArray.push(variant);
+    }
+
+    // Handle file uploads
+    // Assume req.files is an array processed by middleware like multer
+    const productCoverFile = req.files?.find(file => file.fieldname === 'product_cover');
+    const productCoverImage = productCoverFile ? productCoverFile.filename : null;
+
+    // Map variant images by their index (e.g., variant_images_0, variant_images_1, etc.)
+    const variantImagesMap = {};
+    if (req.files) {
+      req.files.forEach(file => {
+        if (file.fieldname.startsWith('variant_images_')) {
+          // Extract the index from the field name
+          const index = file.fieldname.split('variant_images_')[1];
+          if (!variantImagesMap[index]) {
+            variantImagesMap[index] = [];
+          }
+          variantImagesMap[index].push(file.filename);
         }
-
-        const productId = productResults.insertId;
-        const variantQuery = `
-          INSERT INTO variant 
-          (variant_name, product_id, product_name, price, stock, size, material)
-          VALUES ?`;
-        const variantValues = variantsArray.map(variant => [
-          variant.variant_name,
-          productId,
-          name,
-          variant.price,
-          variant.stock,
-          variant.size,
-          variant.material
-        ]);
-
-        connection.query(variantQuery, [variantValues], (err, variantResult) => {
-          if (err) {
-            connection.rollback(() => {
-              connection.release();
-              return next(new AppError("Error inserting variants", 500));
-            });
-          }
-
-          const imageQuery = 'INSERT INTO productimages (variant_id, image_url) VALUES ?';
-          const variantImages = [];
-
-          variantsArray.forEach((variant, index) => {
-            const variantId = variantResult.insertId + index;
-            if (variantImagesMap[index]) {
-              let images = variantImagesMap[index].slice(0, 4);
-              images.forEach(image => {
-                variantImages.push([variantId, image.filename]);
-              });
-            }
-          });
-
-          if (variantImages.length > 0) {
-            connection.query(imageQuery, [variantImages], (err) => {
-              if (err) {
-                connection.rollback(() => {
-                  connection.release();
-                  return next(new AppError("Error inserting variant images", 500));
-                });
-              }
-              connection.commit(err => {
-                if (err) {
-                  connection.rollback(() => {
-                    connection.release();
-                    return next(new AppError("Error committing transaction", 500));
-                  });
-                }
-                connection.release();
-                return res.status(201).json({
-                  message: "Product, variants, and images added successfully",
-                  product_id: productId,
-                  variants_inserted: variantResult.affectedRows
-                });
-              });
-            });
-          } else {
-            connection.commit(err => {
-              if (err) {
-                connection.rollback(() => {
-                  connection.release();
-                  return next(new AppError("Error committing transaction", 500));
-                });
-              }
-              connection.release();
-              return res.status(201).json({
-                message: "Product and variants added successfully",
-                product_id: productId,
-                variants_inserted: variantResult.affectedRows
-              });
-            });
-          }
-        });
       });
+    }
+
+    // Assign images (maximum 4 per variant) to each variant in the array
+    variantsArray.forEach((variant, index) => {
+      if (variantImagesMap[index]) {
+        variant.images = variantImagesMap[index].slice(0, 4);
+      }
     });
-  });
+
+    // Build the product document using your schema fields:
+    // name, description, categoryId, subcategoryId, type, images (array), and variants (embedded)
+    const productData = {
+      _id: newProductId,
+      name,
+      description,
+      categoryId: category,
+      subcategoryId: subcategory,
+      type, // Note: Your schema requires a field named "type" (an ObjectId referencing the Type collection)
+      images: productCoverImage ? [productCoverImage] : [],
+      variants: variantsArray,
+    };
+
+    // Create the product
+    const newProduct = await Product.create(productData);
+
+    return res.status(201).json({
+      message: "Product and variants added successfully",
+      product: newProduct,
+    });
+  } catch (err) {
+    return next(err);
+  }
 };
 
+
 const updateProduct = async (req, res, next) => {
-  let connection;
   try {
-    const productId = req.query.id;
-    if (!productId) {
-      return next(new AppError("Product id is required", 400));
-    }
+    const { productId, name, description, categoryId, subcategoryId, type, images, variants } = req.body;
+    if (!productId) return res.status(400).json({ success: false, message: "Product ID is required" });
 
-    const { product_name, product_desc, category, type, subcategory, variants } = req.body;
-    connection = await db.promise().getConnection();
-    await connection.beginTransaction();
+    const product = await Product.findById(productId);
+    if (!product) return res.status(404).json({ success: false, message: "Product not found" });
 
-    const files = req.files || [];
+    product.name = name || product.name;
+    product.description = description || product.description;
+    product.categoryId = categoryId || product.categoryId;
+    product.subcategoryId = subcategoryId || product.subcategoryId;
+    product.type = type || product.type;
 
-    const [currentProducts] = await connection.query(
-      'SELECT * FROM product WHERE product_id = ?',
-      [productId]
-    );
-    if (currentProducts.length === 0) {
-      await connection.rollback();
-      connection.release();
-      return next(new AppError("Product not found", 404));
-    }
-    const currentProduct = currentProducts[0];
-
-    const productCoverFile = files.find(file => file.fieldname === 'product_cover');
-
-    const productUpdateData = {
-      product_name: product_name !== undefined ? product_name : currentProduct.product_name,
-      product_desc: product_desc !== undefined ? product_desc : currentProduct.product_desc,
-      cat_id: category !== undefined ? category : currentProduct.cat_id,
-      type_id: type !== undefined ? type : currentProduct.type_id,
-      subcategory_id: subcategory !== undefined ? subcategory : currentProduct.subcategory_id,
-      updated_at: new Date()
-    };
+    // Update product cover image using Multer file upload
+    const productCoverFile = req.files?.find(file => file.fieldname === 'product_cover');
     if (productCoverFile) {
-      productUpdateData.product_cover = productCoverFile.filename;
+      product.images = [productCoverFile.filename];
+    } else if (images) {
+      product.images = typeof images === 'string' ? JSON.parse(images) : images;
     }
-
-    await connection.query('UPDATE product SET ? WHERE product_id = ?', [
-      productUpdateData,
-      productId
-    ]);
 
     let parsedVariants = [];
     if (variants) {
-      try {
-        parsedVariants = JSON.parse(variants);
-      } catch (e) {
-        await connection.rollback();
-        connection.release();
-        return next(new AppError("Invalid variants JSON", 400));
-      }
+      parsedVariants = typeof variants === 'string' ? JSON.parse(variants) : variants;
     }
 
-    for (let i = 0; i < parsedVariants.length; i++) {
-      const variant = parsedVariants[i];
+    // Counter for new variants to match file keys correctly
+    let newVariantCounter = 0;
+
+    parsedVariants.forEach((variant) => {
       if (variant.variant_id) {
-        const updateVariantData = {
-          variant_name: variant.variant_name,
+        // Updating existing variant
+        const existingVariant = product.variants.id(variant.variant_id);
+        if (existingVariant) {
+          existingVariant.varirantName = variant.variantName || existingVariant.varirantName;
+          existingVariant.price = variant.price || existingVariant.price;
+          existingVariant.stock = variant.stock || existingVariant.stock;
+          existingVariant.size = variant.size || existingVariant.size;
+          existingVariant.material = variant.material || existingVariant.material;
+          const variantImagesFiles = req.files?.filter(
+            file => file.fieldname === `variant_images_${variant.variant_id}`
+          );
+          if (variantImagesFiles && variantImagesFiles.length > 0) {
+            existingVariant.images = variantImagesFiles.slice(0, 4).map(file => file.filename);
+          }
+        }
+      } else {
+        // Adding new variant, ensure productId is set as required by the schema
+        const newVariant = {
+          varirantName: variant.variantName,
           price: variant.price,
           stock: variant.stock,
           size: variant.size,
-          material: variant.material
+          material: variant.material,
+          images: [],
+          productId: product._id
         };
-        await connection.query('UPDATE variant SET ? WHERE variant_id = ?', [
-          updateVariantData,
-          variant.variant_id
-        ]);
-
-        const variantImagesFiles = files.filter(file => file.fieldname === `variant_images_${variant.variant_id}`);
-        if (variantImagesFiles.length > 0) {
-          await connection.query('DELETE FROM productimages WHERE variant_id = ?', [variant.variant_id]);
-          const limitedFiles = variantImagesFiles.slice(0, 4);
-          const imagesValues = limitedFiles.map(file => [variant.variant_id, file.filename]);
-          if (imagesValues.length > 0) {
-            await connection.query(
-              'INSERT INTO productimages (variant_id, image_url) VALUES ?',
-              [imagesValues]
-            );
-          }
+        const newVariantDoc = product.variants.create(newVariant);
+        product.variants.push(newVariantDoc);
+        const newVariantImagesFiles = req.files?.filter(
+          file => file.fieldname === `variant_images_new_${newVariantCounter}`
+        );
+        newVariantCounter++; // increment for each new variant added
+        if (newVariantImagesFiles && newVariantImagesFiles.length > 0) {
+          newVariantDoc.images = newVariantImagesFiles.slice(0, 4).map(file => file.filename);
         }
       }
-    }
+    });
 
-    for (let i = 0; i < parsedVariants.length; i++) {
-      const variant = parsedVariants[i];
-      if (!variant.variant_id) {
-        const insertVariantData = {
-          variant_name: variant.variant_name,
-          product_id: productId,
-          product_name: productUpdateData.product_name,
-          price: variant.price,
-          stock: variant.stock,
-          size: variant.size,
-          material: variant.material
-        };
-        const [result] = await connection.query('INSERT INTO variant SET ?', [insertVariantData]);
-        const newVariantId = result.insertId;
-
-        const newVariantImagesFiles = files.filter(file => file.fieldname === `variant_images_new_${i}`);
-        if (newVariantImagesFiles.length > 0) {
-          const limitedFiles = newVariantImagesFiles.slice(0, 4);
-          const imagesValues = limitedFiles.map(file => [newVariantId, file.filename]);
-          if (imagesValues.length > 0) {
-            await connection.query(
-              'INSERT INTO productimages (variant_id, image_url) VALUES ?',
-              [imagesValues]
-            );
-          }
-        }
-      }
-    }
-
-    await connection.commit();
-    connection.release();
-    return res.status(200).json({ message: 'Product, variants, and images updated successfully' });
+    const updatedProduct = await product.save();
+    return res.status(200).json({ success: true, message: "Product updated successfully", product: updatedProduct });
   } catch (error) {
     console.error(error);
-    if (connection) {
-      await connection.rollback();
-      connection.release();
-    }
-    return next(new AppError("Server error during product update", 500));
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
+
+
+
+
 
 const deleteProduct = async (req, res, next) => {
   const { id } = req.query;
@@ -339,64 +234,82 @@ const deleteProduct = async (req, res, next) => {
   if (!id) {
     return next(new AppError("Product id is required", 400));
   }
-  const query = `UPDATE jeweltest.product p
-             LEFT JOIN jeweltest.variant v ON p.product_id = v.product_id
-             SET p.product_active = 0, v.variant_active = 0
-             WHERE p.product_id = ?`;
-  db.query(query, [id], (err, results) => {
-    if (err) {
-      return next(new AppError("Database error while deleting product", 500));
-    }
-    return res.status(200).json({ id });
-  });
+  const product = await Product.findByIdAndUpdate(id, { isDeleted: true });
+  if (!product) {
+    return next(new AppError("Product not found", 404));
+  }
+  return res.status(200).json({ message: "Product deleted successfully"});
 };
 
 const updateVariant = async (req, res, next) => {
-  const { id, name, price, stock, size, material } = req.body;
-  console.log(`received data id: ${id}, name: ${name}, price: ${price}, stock: ${stock}, size: ${size}, material: ${material}`);
-  if (!id) {
-    return next(new AppError("Variant id is required", 400));
+  const { id, name, price, stock, size, material, images } = req.body;
+  console.log(`recieved data >>>>>` , req.body);
+  if (!id) return next(new AppError("Variant id is required", 400));
+
+  const product = await Product.findOne(
+    { "variants._id": id },
+    { variants: { $elemMatch: { _id: id } } }
+  );
+  const variant = product?.variants?.[0];
+  if (!variant) return next(new AppError("Variant not found", 404));
+
+  const updateName = name || variant.varirantName;
+  const updatePrice = price || variant.price;
+  const updateStock = stock || variant.stock;
+  const updateSize = size || variant.size;
+  const updateMaterial = material || variant.material;
+  let updateImages = variant.images;
+
+  if (req.files && req.files.length > 0) {
+    updateImages = req.files.map(file => file.filename);
   }
-  db.query('SELECT variant_name FROM jeweltest.variant WHERE variant_id = ?', [id], (err, results) => {
-    if (err) {
-      return next(new AppError("Database error while fetching variant", 500));
-    }
-    if (results.length === 0) {
-      return next(new AppError("Variant not found", 404));
-    }
-    const oldName = results[0].variant_name;
-    const updatedName = name || oldName;
 
-    db.query('UPDATE variant SET variant_name = ?, price = ?, stock = ?, size = ?, material = ? WHERE variant_id = ?', [updatedName, price, stock, size, material, id], (err, results) => {
-      if (err) {
-        return next(new AppError("Database error while updating variant", 500));
+  const updatedVariant = await Product.findOneAndUpdate(
+    { "variants._id": id },
+    {
+      $set: {
+        "variants.$.varirantName": updateName,
+        "variants.$.price": updatePrice,
+        "variants.$.stock": updateStock,
+        "variants.$.size": updateSize,
+        "variants.$.material": updateMaterial,
+        "variants.$.images": updateImages
       }
-      return res.status(200).json({ id, name: updatedName, price, stock, size, material });
-    });
-  });
+    },
+    { new: true }
+  );
+  return res.status(200).json(updatedVariant);
 };
-
 const deleteVariant = async (req, res, next) => {
+ try{
+
   const { id } = req.query;
   console.log(`received id: ${id}`);
   if (!id) {
     return next(new AppError("Variant id is required", 400));
   }
-  const query = `UPDATE jeweltest.variant SET variant_active = 0 WHERE variant_id = ?`;
-  db.query(query, [id], (err, results) => {
-    if (err) {
-      return next(new AppError("Database error while deleting variant", 500));
-    }
-    return res.status(200).json({ id });
-  });
+ const product = await Product.findOneAndUpdate(
+  { "variants._id": id },
+  { $set: { "variants.$.isDeleted": true } },
+  { new: true }
+ )
+ if (!product) {
+  return next(new AppError("Variant not found", 404));
+ }
+  return res.status(200).json({ message: "Variant deleted successfully"});
+ }
+  catch(err){
+    return next(new AppError("Database error while deleting variant", 500));
+  }
 };
 
+
 module.exports = {
+  addProduct,
   products,
   productVariants,
-  addProduct,
-  updateProduct,
   deleteProduct,
+  deleteVariant,
   updateVariant,
-  deleteVariant
+  updateProduct,
 };

@@ -1,4 +1,4 @@
-const {User} = require('../database.js');
+const {User, Order} = require('../database.js');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
@@ -122,61 +122,58 @@ const addAddress = async (req, res, next) => {
   }
 };
 
-// const userOrder = async (req, res, next) => {
-//   let { id, total_amount, status, currency, variant_id, quantity, address_id } = req.body;
-//   console.log(`received data id: ${id}, total_amount: ${total_amount}, address_id: ${address_id}, status: ${status}, currency: ${currency}, variant_id: ${variant_id}, quantity: ${quantity}`);
-//   if (!id || !total_amount || !status || !currency || !variant_id || !quantity) {
-//     return next(new AppError("Missing required fields for order", 400));
-//   }
-//   db.query('SELECT cur_id FROM jeweltest.currency WHERE cur_name = ?', [currency], (err, currencyResults) => {
-//     if (err) {
-//       return next(new AppError("Database error while fetching currency", 500));
-//     }
-//     if (currencyResults.length === 0) {
-//       return next(new AppError("Currency not found", 404));
-//     }
-//     const cur_id = currencyResults[0].cur_id;
-//     db.query('SELECT price, stock FROM jeweltest.variant WHERE variant_id = ?', [variant_id], (err, variantResults) => {
-//       if (err) {
-//         return next(new AppError("Database error while fetching variant", 500));
-//       }
-//       if (variantResults.length === 0) {
-//         return next(new AppError("Variant not found", 404));
-//       }
-//       const { price, stock } = variantResults[0];
-//       if (stock < quantity) {
-//         return next(new AppError("Insufficient stock", 400));
-//       }
-//       const orderDate = new Date();
-//       const totalamount = price * quantity;
-//       db.query('INSERT INTO orders SET ?', { user_id: id, totalamount, order_date: orderDate, order_address_id: address_id, status, cur_id }, (err, orderResults) => {
-//         if (err) {
-//           return next(new AppError("Database error while creating order", 500));
-//         }
-//         const orderId = orderResults.insertId;
-//         db.query('INSERT INTO orderitems SET ?', { order_id: orderId, variant_id, quantity, price }, (err) => {
-//           if (err) {
-//             return next(new AppError("Database error while adding order items", 500));
-//           }
-//           db.query('UPDATE jeweltest.variant SET stock = stock - ? WHERE variant_id = ?', [quantity, variant_id], (err) => {
-//             if (err) {
-//               return next(new AppError("Database error while updating stock", 500));
-//             }
-//             return res.status(200).json({ id, total_amount, status, currency, variant_id, quantity, price });
-//           });
-//         });
-//       });
-//     });
-//   });
-// };
+const addOrder = async (req, res, next) => {
+  let { user, orderNumber, address, items,totalamount } = req.body;
+  console.log(`received data user: ${user}, orderNumber: ${orderNumber}, address: ${address}, items: ${items}`);
+  
+  if (!user || !orderNumber || !address || !items) {
+    return next(new AppError("User, order number, address, and items are required", 400));
+  }
+  
+  // Parse items if passed as a JSON string
+  if (typeof items === "string") {
+    try {
+      items = JSON.parse(items);
+    } catch (err) {
+      return next(new AppError("Invalid items JSON", 400));
+    }
+  }
+  
+  if (!Array.isArray(items) || items.length === 0) {
+    return next(new AppError("Items must be an array with at least one item", 400));
+  }
+  
+  try {
 
+    const order = new Order({
+      user: user,
+      orderNumber: orderNumber,
+      address: address,
+      items: items,
+      totalAmount: totalamount,
+    });
+    
+    const savedOrder = await order.save();
+    
+    // Update the User document to include this order in the orders array.
+    await User.findByIdAndUpdate(user, { $push: { orders: savedOrder._id } });
+    
+    const userOrders = await Order.find({ user: user });
+    
+    return res.status(200).json({ message: "Order added successfully", order: savedOrder, userOrders });
+  } catch (error) {
+    console.error(error);
+    return next(new AppError("Server error while adding order", 500));
+  }
+};
 const user = async (req, res, next) => {
   const { email } = req.query;
   console.log(`received email: ${email}`);
   if (!email) {
     return next(new AppError("Email is required", 400));
   }
-  const results = await User.find( {$and: [{ email: email},{ isDeleted: false }] });
+  const results = await User.find( {$and: [{ email: email},{ isDeleted: false }] })
+    .populate('orders', 'orderNumber items totalAmount status');
   if (results.length === 0) {
     return next(new AppError("User not found", 404));
   }
@@ -185,10 +182,10 @@ const user = async (req, res, next) => {
   return res.status(200).json(user);
 };
 
-// const logout = async (req, res, next) => {
-//   res.clearCookie('jwt');
-//   return res.status(200).json({ message: "Logged out" });
-// };
+const logout = async (req, res, next) => {
+  res.clearCookie('jwt');
+  return res.status(200).json({ message: "Logged out" });
+};
 
 const address = async (req, res, next) => {
   const { id } = req.query;
@@ -389,4 +386,4 @@ const updateUser = async (req, res, next) => {
 //   );
 // };
 
-module.exports = { register, user, login, addAddress, address, updateAddress, deleteAddress, updateUser  };
+module.exports = { register, user, login, addAddress, address, updateAddress, deleteAddress, updateUser, logout, addOrder  };
