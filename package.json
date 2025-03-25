@@ -31,5 +31,8 @@
     "string-strip-html": "^13.4.8",
     "uuid": "^11.1.0",
     "winston": "^3.17.0"
+  },
+  "devDependencies": {
+    "prettier": "3.5.3"
   }
 }
